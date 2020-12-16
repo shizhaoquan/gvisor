@@ -3048,7 +3048,7 @@ func (e *endpoint) completeState() stack.TCPEndpointState {
 		}
 	}
 
-	rc := e.snd.rc
+	rc := &e.snd.rc
 	s.Sender.RACKState = stack.TCPRACKState{
 		XmitTime:    rc.xmitTime,
 		EndSequence: rc.endSequence,

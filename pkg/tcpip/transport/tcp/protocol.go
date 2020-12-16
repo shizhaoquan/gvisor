@@ -405,7 +405,7 @@ func (p *protocol) Option(option tcpip.GettableTransportProtocolOption) *tcpip.E
 
 	case *tcpip.TCPRecovery:
 		p.mu.RLock()
-		*v = tcpip.TCPRecovery(p.recovery)
+		*v = p.recovery
 		p.mu.RUnlock()
 		return nil
 
