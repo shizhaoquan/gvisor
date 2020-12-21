@@ -27,8 +27,11 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/checker"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
+	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
+	"gvisor.dev/gvisor/pkg/tcpip/link/ethernet"
 	"gvisor.dev/gvisor/pkg/tcpip/link/loopback"
 	"gvisor.dev/gvisor/pkg/tcpip/link/sniffer"
+	"gvisor.dev/gvisor/pkg/tcpip/network/arp"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/ports"
@@ -50,6 +53,12 @@ const (
 	// IPv4 endpoint when the MTU is set to defaultMTU in the test.
 	defaultIPv4MSS = defaultMTU - header.IPv4MinimumSize - header.TCPMinimumSize
 )
+
+type callback func(*waiter.Entry, waiter.EventMask)
+
+func (cb callback) Callback(e *waiter.Entry, m waiter.EventMask) {
+	cb(e, m)
+}
 
 func TestGiveUpConnect(t *testing.T) {
 	c := context.New(t, defaultMTU)
@@ -4775,6 +4784,86 @@ func TestConnectAvoidsBoundPorts(t *testing.T) {
 						})
 					}
 				})
+			}
+		})
+	}
+}
+
+// TestConnectLinkAddrFailureNotify tests for endpoint connect to notify
+// HUp event on link address resolution failure.
+func TestConnectLinkAddrFailureNotify(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		netProto    tcpip.NetworkProtocolNumber
+		addr        tcpip.Address
+		connectAddr tcpip.Address
+		routeSubnet tcpip.Subnet
+	}{
+		{"v4", ipv4.ProtocolNumber, context.StackAddr, context.TestAddr, header.IPv4EmptySubnet},
+		{"v6", ipv6.ProtocolNumber, context.StackV6Addr, context.TestV6Addr, header.IPv6EmptySubnet},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := stack.New(stack.Options{
+				NetworkProtocols: []stack.NetworkProtocolFactory{
+					arp.NewProtocol,
+					ipv4.NewProtocol,
+					ipv6.NewProtocol,
+				},
+				TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol},
+			})
+
+			nicID := tcpip.NICID(1)
+			// Create a link endpoint that has the capability for link address
+			// resolution.
+			e := ethernet.New(channel.New(0, defaultMTU, ""))
+			if err := s.CreateNIC(nicID, e); err != nil {
+				t.Fatalf("got CreateNIC(%d, %+v) = %s", nicID, e, err)
+			}
+
+			if err := s.EnableNIC(nicID); err != nil {
+				t.Fatalf("got EnableNIC(%d) = %s", nicID, err)
+			}
+			if err := s.AddAddress(nicID, tt.netProto, tt.addr); err != nil {
+				t.Fatalf("got stack.AddAddress(%d, %d, %s) = %s", nicID, tt.netProto, tt.addr, err)
+			}
+
+			s.AddRoute(tcpip.Route{
+				Destination: tt.routeSubnet,
+				NIC:         nicID,
+			})
+
+			var wq waiter.Queue
+			ep, err := s.NewEndpoint(tcp.ProtocolNumber, tt.netProto, &wq)
+			if err != nil {
+				t.Fatalf("got NewEndpoint(%d, %d, _) = %s", tcp.ProtocolNumber, tt.netProto, err)
+			}
+			defer ep.Close()
+
+			events := make(chan waiter.EventMask)
+			waitEntry := waiter.Entry{Callback: callback(func(_ *waiter.Entry, m waiter.EventMask) {
+				events <- m
+			})}
+			wq.EventRegister(&waitEntry, waiter.AllEvents)
+
+			// Connect to a routable peer, but without link-address resolution.
+			if err := ep.Connect(tcpip.FullAddress{NIC: nicID, Addr: tt.connectAddr}); err != tcpip.ErrConnectStarted {
+				t.Fatalf("got ep.Connect(...) = %s, want = %s", err, tcpip.ErrConnectStarted)
+			}
+
+			select {
+			case got := <-events:
+				if want := waiter.EventHUp | waiter.EventErr | waiter.EventIn | waiter.EventOut; got != want {
+					t.Fatalf("got EventMask  = %b, want = %b", got, want)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("did not receive HUp event")
+			}
+
+			// Unregister the entry to avoid being called back again by the
+			// subsequent erroring Connect.
+			wq.EventUnregister(&waitEntry)
+			if err := ep.Connect(tcpip.FullAddress{NIC: nicID, Addr: tt.connectAddr}); err != tcpip.ErrNoLinkAddress {
+				t.Fatalf("got ep.Connect(...) = %s, want = %s", err, tcpip.ErrNoLinkAddress)
 			}
 		})
 	}

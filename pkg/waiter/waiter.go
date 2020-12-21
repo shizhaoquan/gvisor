@@ -73,14 +73,14 @@ const (
 	EventErr EventMask = 0x08 // POLLERR
 	EventHUp EventMask = 0x10 // POLLHUP
 
-	allEvents EventMask = 0x1f
+	AllEvents EventMask = 0x1f
 )
 
 // EventMaskFromLinux returns an EventMask representing the supported events
 // from the Linux events e, which is in the format used by poll(2).
 func EventMaskFromLinux(e uint32) EventMask {
 	// Our flag definitions are currently identical to Linux.
-	return EventMask(e) & allEvents
+	return EventMask(e) & AllEvents
 }
 
 // ToLinux returns e in the format used by Linux poll(2).

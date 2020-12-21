@@ -92,6 +92,7 @@ func init() {
 	addErrMapping(tcpip.ErrConnectionAborted, ErrConnectionAborted)
 	addErrMapping(tcpip.ErrNoSuchFile, ErrNoSuchFile)
 	addErrMapping(tcpip.ErrInvalidOptionValue, ErrInvalidOptionValue)
+	// TODO(iyerm): Linux treats this error as ErrNoRoute.
 	addErrMapping(tcpip.ErrNoLinkAddress, ErrHostDown)
 	addErrMapping(tcpip.ErrBadAddress, ErrBadAddress)
 	addErrMapping(tcpip.ErrNetworkUnreachable, ErrNetworkUnreachable)

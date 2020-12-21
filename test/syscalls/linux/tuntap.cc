@@ -19,6 +19,7 @@
 #include <linux/if_tun.h>
 #include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -43,6 +44,9 @@ constexpr int kIPLen = 4;
 
 constexpr const char kDevNetTun[] = "/dev/net/tun";
 constexpr const char kTapName[] = "tap0";
+
+constexpr const char kTapIPAddr[] = "10.0.0.1";
+constexpr const char kTapPeerIPAddr[] = "10.0.0.2";
 
 constexpr const uint8_t kMacA[ETH_ALEN] = {0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA};
 constexpr const uint8_t kMacB[ETH_ALEN] = {0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB};
@@ -272,7 +276,7 @@ PosixErrorOr<FileDescriptor> OpenAndAttachTap(
 
   // Interface setup.
   struct in_addr addr;
-  inet_pton(AF_INET, dev_ipv4_addr.c_str(), &addr);
+  EXPECT_EQ(inet_pton(AF_INET, dev_ipv4_addr.c_str(), &addr), 1);
   EXPECT_NO_ERRNO(LinkAddLocalAddr(link.index, AF_INET, /*prefixlen=*/24, &addr,
                                    sizeof(addr)));
 
@@ -306,9 +310,11 @@ TEST_F(TuntapTest, PingKernel) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
 
   FileDescriptor fd =
-      ASSERT_NO_ERRNO_AND_VALUE(OpenAndAttachTap(kTapName, "10.0.0.1"));
-  ping_pkt ping_req = CreatePingPacket(kMacB, "10.0.0.2", kMacA, "10.0.0.1");
-  std::string arp_rep = CreateArpPacket(kMacB, "10.0.0.2", kMacA, "10.0.0.1");
+      ASSERT_NO_ERRNO_AND_VALUE(OpenAndAttachTap(kTapName, kTapIPAddr));
+  ping_pkt ping_req =
+      CreatePingPacket(kMacB, kTapPeerIPAddr, kMacA, kTapIPAddr);
+  std::string arp_rep =
+      CreateArpPacket(kMacB, kTapPeerIPAddr, kMacA, kTapIPAddr);
 
   // Send ping, this would trigger an ARP request on Linux.
   EXPECT_THAT(write(fd.get(), &ping_req, sizeof(ping_req)),
@@ -360,7 +366,7 @@ TEST_F(TuntapTest, SendUdpTriggersArpResolution) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
 
   FileDescriptor fd =
-      ASSERT_NO_ERRNO_AND_VALUE(OpenAndAttachTap(kTapName, "10.0.0.1"));
+      ASSERT_NO_ERRNO_AND_VALUE(OpenAndAttachTap(kTapName, kTapIPAddr));
 
   // Send a UDP packet to remote.
   int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
@@ -369,9 +375,10 @@ TEST_F(TuntapTest, SendUdpTriggersArpResolution) {
   struct sockaddr_in remote = {};
   remote.sin_family = AF_INET;
   remote.sin_port = htons(42);
-  inet_pton(AF_INET, "10.0.0.2", &remote.sin_addr);
+  ASSERT_EQ(inet_pton(AF_INET, kTapPeerIPAddr, &remote.sin_addr), 1);
   int ret = sendto(sock, "hello", 5, 0, reinterpret_cast<sockaddr*>(&remote),
                    sizeof(remote));
+  // TODO(iyerm): Linux returns EHOSTUNREACH here.
   ASSERT_THAT(ret, ::testing::AnyOf(SyscallSucceeds(),
                                     SyscallFailsWithErrno(EHOSTDOWN)));
 
@@ -398,13 +405,77 @@ TEST_F(TuntapTest, SendUdpTriggersArpResolution) {
   }
 }
 
+// TCPBlockingConnectFailsArpResolution tests for TCP connect to fail on link
+// address resolution failure to a routable, but non existent peer.
+TEST_F(TuntapTest, TCPBlockingConnectFailsArpResolution) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
+
+  int sender;
+  ASSERT_THAT(sender = socket(AF_INET, SOCK_STREAM, IPPROTO_IP),
+              SyscallSucceeds());
+
+  FileDescriptor fd =
+      ASSERT_NO_ERRNO_AND_VALUE(OpenAndAttachTap(kTapName, kTapIPAddr));
+
+  sockaddr_in connectAddr = {
+      .sin_family = AF_INET,
+  };
+  ASSERT_EQ(inet_pton(AF_INET, kTapPeerIPAddr, &connectAddr.sin_addr.s_addr),
+            1);
+
+  // TODO(iyerm): Linux returns EHOSTUNREACH here.
+  ASSERT_THAT(
+      connect(sender, reinterpret_cast<const struct sockaddr*>(&connectAddr),
+              sizeof(connectAddr)),
+      SyscallFailsWithErrno(EHOSTDOWN));
+}
+
+// TCPNonBlockingConnectFailsArpResolution tests for TCP non-blocking connect to
+// to trigger an error event to be notified to poll on link address resolution
+// failure to a routable, but non existent peer.
+TEST_F(TuntapTest, TCPNonBlockingConnectFailsArpResolution) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
+
+  int sender;
+  ASSERT_THAT(sender = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, IPPROTO_IP),
+              SyscallSucceeds());
+
+  FileDescriptor fd =
+      ASSERT_NO_ERRNO_AND_VALUE(OpenAndAttachTap(kTapName, kTapIPAddr));
+
+  sockaddr_in connectAddr = {
+      .sin_family = AF_INET,
+  };
+  ASSERT_EQ(inet_pton(AF_INET, kTapPeerIPAddr, &connectAddr.sin_addr.s_addr),
+            1);
+
+  ASSERT_THAT(
+      connect(sender, reinterpret_cast<const struct sockaddr*>(&connectAddr),
+              sizeof(connectAddr)),
+      SyscallFailsWithErrno(EINPROGRESS));
+
+  constexpr int kTimeout = 10000;
+  struct pollfd pfd = {
+      .fd = sender,
+      .events = POLLIN | POLLPRI | POLLOUT | POLLRDHUP,
+  };
+  ASSERT_THAT(poll(&pfd, 1, kTimeout), SyscallSucceedsWithValue(1));
+  ASSERT_EQ(pfd.revents, POLLIN | POLLOUT | POLLHUP | POLLPRI | POLLERR);
+
+  // TODO(iyerm): Linux returns EHOSTUNREACH here.
+  ASSERT_THAT(
+      connect(sender, reinterpret_cast<const struct sockaddr*>(&connectAddr),
+              sizeof(connectAddr)),
+      SyscallFailsWithErrno(EHOSTDOWN));
+}
+
 // Write hang bug found by syskaller: b/155928773
 // https://syzkaller.appspot.com/bug?id=065b893bd8d1d04a4e0a1d53c578537cde1efe99
 TEST_F(TuntapTest, WriteHangBug155928773) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
 
   FileDescriptor fd =
-      ASSERT_NO_ERRNO_AND_VALUE(OpenAndAttachTap(kTapName, "10.0.0.1"));
+      ASSERT_NO_ERRNO_AND_VALUE(OpenAndAttachTap(kTapName, kTapIPAddr));
 
   int sock = socket(AF_INET, SOCK_DGRAM, 0);
   ASSERT_THAT(sock, SyscallSucceeds());
@@ -412,7 +483,7 @@ TEST_F(TuntapTest, WriteHangBug155928773) {
   struct sockaddr_in remote = {};
   remote.sin_family = AF_INET;
   remote.sin_port = htons(42);
-  inet_pton(AF_INET, "10.0.0.1", &remote.sin_addr);
+  ASSERT_EQ(inet_pton(AF_INET, kTapIPAddr, &remote.sin_addr), 1);
   // Return values do not matter in this test.
   connect(sock, reinterpret_cast<struct sockaddr*>(&remote), sizeof(remote));
   write(sock, "hello", 5);
