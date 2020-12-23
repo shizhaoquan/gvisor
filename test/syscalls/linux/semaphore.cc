@@ -32,8 +32,6 @@
 #include "test/util/test_util.h"
 #include "test/util/thread_util.h"
 
-using ::testing::Contains;
-
 namespace gvisor {
 namespace testing {
 namespace {
@@ -793,7 +791,6 @@ TEST(SemaphoreTest, IpcInfo) {
   struct seminfo info;
   // Drop CAP_IPC_OWNER which allows us to bypass semaphore permissions.
   ASSERT_NO_ERRNO(SetCapability(CAP_IPC_OWNER, false));
-  ASSERT_THAT(semctl(0, 0, IPC_INFO, &info), SyscallSucceedsWithValue(0));
   for (int i = 0; i < kLoops; i++) {
     AutoSem sem(semget(IPC_PRIVATE, 1, 0600 | IPC_CREAT));
     ASSERT_THAT(sem.get(), SyscallSucceeds());
@@ -805,13 +802,12 @@ TEST(SemaphoreTest, IpcInfo) {
   EXPECT_THAT(max_used_index = semctl(0, 0, IPC_INFO, &info),
               SyscallSucceeds());
 
-  int index_count = 0;
+  std::set<int> sem_ids_before_max_index;
   for (int i = 0; i <= max_used_index; i++) {
     struct semid_ds ds = {};
     int sem_id = semctl(i, 0, SEM_STAT, &ds);
     // Only if index i is used within the registry.
-    if (sem_id != -1) {
-      ASSERT_THAT(sem_ids, Contains(sem_id));
+    if (sem_id != -1 && sem_ids.find(sem_id) != sem_ids.end()) {
       struct semid_ds ipc_stat_ds;
       ASSERT_THAT(semctl(sem_id, 0, IPC_STAT, &ipc_stat_ds), SyscallSucceeds());
       EXPECT_EQ(ds.sem_perm.__key, ipc_stat_ds.sem_perm.__key);
@@ -833,17 +829,18 @@ TEST(SemaphoreTest, IpcInfo) {
       ASSERT_THAT(semctl(sem_id, 0, IPC_SET, &ipc_set_ds), SyscallSucceeds());
       ASSERT_THAT(semctl(i, 0, SEM_STAT, &ds), SyscallFailsWithErrno(EACCES));
 
-      index_count += 1;
+      sem_ids_before_max_index.insert(sem_id);
     }
   }
-  EXPECT_EQ(index_count, kLoops);
-  ASSERT_THAT(semctl(0, 0, IPC_INFO, &info),
-              SyscallSucceedsWithValue(max_used_index));
+  EXPECT_EQ(sem_ids_before_max_index.size(), kLoops);
+  int max_index = -1;
+  ASSERT_THAT(max_index = semctl(0, 0, IPC_INFO, &info), SyscallSucceeds());
+  EXPECT_GE(max_index, max_used_index);
   for (const int sem_id : sem_ids) {
     ASSERT_THAT(semctl(sem_id, 0, IPC_RMID), SyscallSucceeds());
   }
 
-  ASSERT_THAT(semctl(0, 0, IPC_INFO, &info), SyscallSucceedsWithValue(0));
+  ASSERT_THAT(semctl(0, 0, IPC_INFO, &info), SyscallSucceeds());
   EXPECT_EQ(info.semmap, kSemMap);
   EXPECT_EQ(info.semmni, kSemMni);
   EXPECT_EQ(info.semmns, kSemMns);
@@ -863,7 +860,6 @@ TEST(SemaphoreTest, SemInfo) {
   struct seminfo info;
   // Drop CAP_IPC_OWNER which allows us to bypass semaphore permissions.
   ASSERT_NO_ERRNO(SetCapability(CAP_IPC_OWNER, false));
-  ASSERT_THAT(semctl(0, 0, IPC_INFO, &info), SyscallSucceedsWithValue(0));
   for (int i = 0; i < kLoops; i++) {
     AutoSem sem(semget(IPC_PRIVATE, kSemSetSize, 0600 | IPC_CREAT));
     ASSERT_THAT(sem.get(), SyscallSucceeds());
@@ -880,17 +876,16 @@ TEST(SemaphoreTest, SemInfo) {
   EXPECT_EQ(info.semmsl, kSemMsl);
   EXPECT_EQ(info.semopm, kSemOpm);
   EXPECT_EQ(info.semume, kSemUme);
-  EXPECT_EQ(info.semusz, sem_ids.size());
+  EXPECT_GE(info.semusz, sem_ids.size());
   EXPECT_EQ(info.semvmx, kSemVmx);
-  EXPECT_EQ(info.semaem, sem_ids.size() * kSemSetSize);
+  EXPECT_GE(info.semaem, sem_ids.size() * kSemSetSize);
 
-  int index_count = 0;
+  std::set<int> sem_ids_before_max_index;
   for (int i = 0; i <= max_used_index; i++) {
     struct semid_ds ds = {};
     int sem_id = semctl(i, 0, SEM_STAT, &ds);
     // Only if index i is used within the registry.
-    if (sem_id != -1) {
-      ASSERT_THAT(sem_ids, Contains(sem_id));
+    if (sem_id != -1 && sem_ids.find(sem_id) != sem_ids.end()) {
       struct semid_ds ipc_stat_ds;
       ASSERT_THAT(semctl(sem_id, 0, IPC_STAT, &ipc_stat_ds), SyscallSucceeds());
       EXPECT_EQ(ds.sem_perm.__key, ipc_stat_ds.sem_perm.__key);
@@ -912,17 +907,18 @@ TEST(SemaphoreTest, SemInfo) {
       ASSERT_THAT(semctl(sem_id, 0, IPC_SET, &ipc_set_ds), SyscallSucceeds());
       ASSERT_THAT(semctl(i, 0, SEM_STAT, &ds), SyscallFailsWithErrno(EACCES));
 
-      index_count += 1;
+      sem_ids_before_max_index.insert(sem_id);
     }
   }
-  EXPECT_EQ(index_count, kLoops);
-  ASSERT_THAT(semctl(0, 0, SEM_INFO, &info),
-              SyscallSucceedsWithValue(max_used_index));
+  EXPECT_EQ(sem_ids_before_max_index.size(), kLoops);
+  int max_index = -1;
+  ASSERT_THAT(max_index = semctl(0, 0, SEM_INFO, &info), SyscallSucceeds());
+  EXPECT_GE(max_index, max_used_index);
   for (const int sem_id : sem_ids) {
     ASSERT_THAT(semctl(sem_id, 0, IPC_RMID), SyscallSucceeds());
   }
 
-  ASSERT_THAT(semctl(0, 0, SEM_INFO, &info), SyscallSucceedsWithValue(0));
+  ASSERT_THAT(semctl(0, 0, SEM_INFO, &info), SyscallSucceeds());
   EXPECT_EQ(info.semmap, kSemMap);
   EXPECT_EQ(info.semmni, kSemMni);
   EXPECT_EQ(info.semmns, kSemMns);
@@ -930,9 +926,9 @@ TEST(SemaphoreTest, SemInfo) {
   EXPECT_EQ(info.semmsl, kSemMsl);
   EXPECT_EQ(info.semopm, kSemOpm);
   EXPECT_EQ(info.semume, kSemUme);
-  EXPECT_EQ(info.semusz, 0);
+  EXPECT_GE(info.semusz, 0);
   EXPECT_EQ(info.semvmx, kSemVmx);
-  EXPECT_EQ(info.semaem, 0);
+  EXPECT_GE(info.semaem, 0);
 }
 
 }  // namespace
